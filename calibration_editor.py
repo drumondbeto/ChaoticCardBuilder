@@ -105,6 +105,23 @@ TEXT_ITEMS = [
         "debug_box_width": 2,
         "debug_box_dash": (6, 3),
         "show_debug_box": True,
+    },
+    {
+        "id": "mugic counter value",
+        "content": "9",
+        "position": (47, 658),
+        "box_width": 34,
+        "box_height": 34,
+        "align": "center",
+        "anchor": "center",
+        "font_path": "arial.ttf",
+        "font_size": 24,
+        "color": (0, 0, 0, 0),
+        "line_spacing": 8,
+        "debug_box_outline": "#00FF00",
+        "debug_box_width": 2,
+        "debug_box_dash": (6, 3),
+        "show_debug_box": True,
     }
 ]
 
