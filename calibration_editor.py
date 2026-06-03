@@ -1,4 +1,5 @@
 import json
+import re
 import textwrap
 from pathlib import Path
 import tkinter as tk
@@ -191,6 +192,13 @@ def overlay_frame(composed_image: Image.Image, frame_image: Image.Image) -> Imag
 
 
 
+INLINE_ICON_PATTERN = re.compile(r"\{\{([A-Za-z0-9_-]+)\}\}")
+ICON_ALIAS_MAP = {
+    "MC": "icons/mugic_counter.png",
+}
+ICON_IMAGE_CACHE = {}
+
+
 def get_font_candidates(font_path: str):
     candidates = []
     if font_path:
@@ -215,7 +223,6 @@ def get_font_candidates(font_path: str):
     return seen
 
 
-
 def load_font(font_path: str, font_size: int):
     for candidate in get_font_candidates(font_path):
         try:
@@ -225,50 +232,128 @@ def load_font(font_path: str, font_size: int):
     return ImageFont.load_default()
 
 
+def resolve_inline_icon_path(alias_or_path: str) -> Path:
+    if alias_or_path in ICON_ALIAS_MAP:
+        return Path(ICON_ALIAS_MAP[alias_or_path])
+    return Path(alias_or_path)
+
+
+def parse_inline_segments(content: str) -> list[dict]:
+    segments = []
+    last_index = 0
+    for match in INLINE_ICON_PATTERN.finditer(content):
+        if match.start() > last_index:
+            segments.append({"type": "text", "value": content[last_index:match.start()]})
+        segments.append({"type": "image", "value": match.group(1)})
+        last_index = match.end()
+    if last_index < len(content):
+        segments.append({"type": "text", "value": content[last_index:]})
+    return segments
+
+
+def get_line_height(font):
+    ascent, descent = font.getmetrics()
+    return ascent + descent
+
+
+def load_inline_icon(icon_path: str, line_height: int) -> Image.Image:
+    key = (icon_path, line_height)
+    if key in ICON_IMAGE_CACHE:
+        return ICON_IMAGE_CACHE[key]
+
+    resolved = resolve_inline_icon_path(icon_path)
+    search_candidates = [resolved]
+    if not resolved.is_absolute():
+        search_candidates.extend([
+            Path.cwd() / resolved,
+            Path.cwd() / "icons" / resolved,
+            Path.cwd() / "icons" / f"{icon_path}.png",
+            Path.cwd() / "icons" / f"{icon_path.lower()}.png",
+            Path.cwd() / "icons" / f"{icon_path.upper()}.png",
+        ])
+
+    path = None
+    for candidate in search_candidates:
+        if candidate.exists():
+            path = candidate
+            break
+
+    if path is None:
+        raise FileNotFoundError(f"Ícone não encontrado: {icon_path}")
+
+    icon = Image.open(path).convert("RGBA")
+    if icon.height != line_height:
+        new_width = max(1, int(icon.width * line_height / icon.height))
+        icon = icon.resize((new_width, line_height), Image.Resampling.LANCZOS)
+
+    ICON_IMAGE_CACHE[key] = icon
+    return icon
+
 
 def measure_text(draw, text, font, spacing):
     bbox = draw.multiline_textbbox((0, 0), text, font=font, spacing=spacing, align="left")
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
+def measure_token(draw, token, font, spacing):
+    if token["type"] == "text":
+        return measure_text(draw, token["value"], font, spacing)
+    try:
+        icon = load_inline_icon(token["value"], get_line_height(font))
+        return icon.width, icon.height
+    except Exception:
+        return 0, get_line_height(font)
+
+
+def split_segments_into_tokens(segments: list[dict]) -> list[dict]:
+    tokens = []
+    for segment in segments:
+        if segment["type"] == "text":
+            tokens.extend({"type": "text", "value": part} for part in re.findall(r"\s+|[^\s]+", segment["value"]))
+        else:
+            tokens.append(segment)
+    return tokens
+
 
 def wrap_text_to_width(draw, content, font, max_width, spacing):
     if not content:
-        return ""
-    paragraphs = content.splitlines() or [content]
-    wrapped_paragraphs = []
+        return [[]]
 
-    for paragraph in paragraphs:
-        words = paragraph.split()
-        if not words:
-            wrapped_paragraphs.append("")
+    segments = parse_inline_segments(content)
+    tokens = split_segments_into_tokens(segments)
+    lines = []
+    current_line = []
+    current_width = 0
+
+    for token in tokens:
+        token_width, _ = measure_token(draw, token, font, spacing)
+
+        if token["type"] == "text" and token_width > max_width and token["value"].strip():
+            wrap_width = max(1, int(len(token["value"]) * max_width / max(token_width, 1)))
+            broken_parts = textwrap.wrap(token["value"], width=wrap_width) or [token["value"]]
+            for part in broken_parts:
+                subtoken = {"type": "text", "value": part}
+                sub_width, _ = measure_token(draw, subtoken, font, spacing)
+                if current_line and current_width + sub_width > max_width:
+                    lines.append(current_line)
+                    current_line = []
+                    current_width = 0
+                current_line.append(subtoken)
+                current_width += sub_width
             continue
 
-        lines = []
-        current = words[0]
-        for word in words[1:]:
-            test = f"{current} {word}"
-            width, _ = measure_text(draw, test, font, spacing)
-            if width <= max_width:
-                current = test
-            else:
-                lines.append(current)
-                current = word
-        lines.append(current)
+        if current_line and current_width + token_width > max_width:
+            lines.append(current_line)
+            current_line = []
+            current_width = 0
 
-        adjusted = []
-        for line in lines:
-            width, _ = measure_text(draw, line, font, spacing)
-            if width <= max_width:
-                adjusted.append(line)
-                continue
-            broken = textwrap.wrap(line, width=max(1, int(len(line) * max_width / max(width, 1)))) or [line]
-            for part in broken:
-                adjusted.append(part)
-        wrapped_paragraphs.append("\n".join(adjusted))
+        current_line.append(token)
+        current_width += token_width
 
-    return "\n".join(wrapped_paragraphs)
+    if current_line:
+        lines.append(current_line)
 
+    return lines
 
 
 def get_box_rectangle(x, y, box_width, box_height, anchor="nw"):
@@ -297,7 +382,6 @@ def get_box_rectangle(x, y, box_width, box_height, anchor="nw"):
     return left, top, right, bottom
 
 
-
 def get_textbox_layout(draw, text_item, font):
     x, y = text_item["position"]
     box_width = text_item.get("box_width", 300)
@@ -306,31 +390,30 @@ def get_textbox_layout(draw, text_item, font):
     spacing = text_item.get("line_spacing", 4)
     align = text_item.get("align", "left")
     x1, y1, x2, y2 = get_box_rectangle(x, y, box_width, box_height, anchor)
-    wrapped_text = wrap_text_to_width(draw, text_item.get("content", ""), font, box_width, spacing)
-    text_w, text_h = measure_text(draw, wrapped_text or " ", font, spacing)
+    lines = wrap_text_to_width(draw, text_item.get("content", ""), font, box_width, spacing)
+    line_height = get_line_height(font)
+    total_height = len(lines) * line_height + max(0, len(lines) - 1) * spacing
+    text_y = y1 + max(0, (box_height - total_height) / 2)
 
-    if align == "center":
-        text_x = x1 + box_width / 2
-    elif align == "right":
-        text_x = x2
-    else:
-        text_x = x1
-
-    text_y = y1 + box_height / 2
-    pillow_anchor = {
-        "left": "lm",
-        "center": "mm",
-        "right": "rm",
-    }.get(align, "lm")
+    line_layouts = []
+    for line in lines:
+        line_width = sum(measure_token(draw, token, font, spacing)[0] for token in line)
+        if align == "center":
+            line_x = x1 + (box_width - line_width) / 2
+        elif align == "right":
+            line_x = x2 - line_width
+        else:
+            line_x = x1
+        line_layouts.append({"tokens": line, "x": line_x, "y": text_y, "width": line_width})
+        text_y += line_height + spacing
 
     return {
         "box": (x1, y1, x2, y2),
-        "wrapped_text": wrapped_text,
-        "text_size": (text_w, text_h),
-        "draw_xy": (text_x, text_y),
-        "pillow_anchor": pillow_anchor,
+        "lines": line_layouts,
+        "text_size": (box_width, total_height),
+        "draw_xy": (x1, y1),
+        "pillow_anchor": "lm",
     }
-
 
 
 def add_textboxes(image: Image.Image, text_items: list[dict], draw_debug=False) -> Image.Image:
@@ -340,15 +423,21 @@ def add_textboxes(image: Image.Image, text_items: list[dict], draw_debug=False) 
     for item in text_items:
         font = load_font(item.get("font_path", ""), item.get("font_size", 24))
         layout = get_textbox_layout(draw, item, font)
-        draw.multiline_text(
-            layout["draw_xy"],
-            layout["wrapped_text"],
-            font=font,
-            fill=item.get("color", (0, 0, 0, 255)),
-            spacing=item.get("line_spacing", 4),
-            align=item.get("align", "left"),
-            anchor=layout["pillow_anchor"],
-        )
+        for line in layout["lines"]:
+            x = line["x"]
+            y = line["y"]
+            for token in line["tokens"]:
+                if token["type"] == "text":
+                    draw.text((x, y), token["value"], font=font, fill=item.get("color", (0, 0, 0, 255)))
+                    token_width, _ = measure_token(draw, token, font, item.get("line_spacing", 4))
+                else:
+                    try:
+                        icon = load_inline_icon(token["value"], get_line_height(font))
+                        result.paste(icon, (int(x), int(y)), icon)
+                        token_width = icon.width
+                    except Exception:
+                        token_width = 0
+                x += token_width
 
         if draw_debug and item.get("show_debug_box", True):
             draw.rectangle(
